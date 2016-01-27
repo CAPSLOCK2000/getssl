@@ -558,7 +558,7 @@ for d in $alldomains; do
           sleep 2
         else
           debug "dns check failed - removing existing value"
-          DNS_DEL_COMMAND $DOMAIN
+          $DNS_DEL_COMMAND $DOMAIN
           error_exit "checking _acme-challenge.$DOMAIN gave $check_result not $auth_key"
         fi
       fi
