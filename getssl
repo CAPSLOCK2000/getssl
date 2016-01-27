@@ -554,7 +554,7 @@ for d in $alldomains; do
       else
         if [[ $ntries -lt 5 ]]; then
           ntries=$(( $ntries + 1 ))
-          debug "try $ntries - sleep 2 secs before testiing verify again"
+          debug "try $ntries - sleep 2 secs before testing verify again"
           sleep 2
         else
           debug "dns check failed - removing existing value"
@@ -620,7 +620,7 @@ for d in $alldomains; do
     else
       error_exit "$d:Verify error:$response"
     fi
-    debug "sleep 5 secs berfore testiing verify again"
+    debug "sleep 5 secs brfore testing verify again"
     sleep 5
   done
 
