@@ -538,7 +538,7 @@ for d in $alldomains; do
 
     $DNS_ADD_COMMAND "$DOMAIN" "$auth_key"
 
-    primary_ns=$(dig +noall +authority -t SOA ${DOMAIN} | awk '{sub(/.$/, "", $5); print $5}')
+    primary_ns=$(dig +noall +authority -t SOA ${DOMAIN} | awk '{sub(/.$/, "", $5); print $5}' | head -1)
     debug primary_ns $primary_ns
 
     ntries=0
