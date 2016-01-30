@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Update serial in a zone file
+# Casper Gielen, 2016
+
+usage() {
+	echo "usage: update-serial <zonefile>"
+	echo "Updates the serial of a zonefile to the current date + a counter"
+	exit 1
+}
+
+zonefile="$1"
+[ -z "$zonefile" ] && usage
+
+# FIXME: improve the way we find the serial
+old=$(awk '/;serial/{print $1}' $zonefile)
+old_date=${old:0:8}
+old_count=${old:(-2)}
+new_date=$(date +%Y%m%d)
+new_count="00"
+if [ "$new_date" == "$old_date" ]; then
+	new_count=$(printf "%02d" "$[ 10#$old_count + 1 ]")
+fi
+new="${new_date}${new_count}"
+# FIXME: make sure we change the right line
+sed -i "s/$old/$new/" $zonefile

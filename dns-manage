@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# Casper Gielen, 2016
+
+zonedir="/etc/puppet/files/systems/dnsserver/etc/bind/zones/gielen.name/"
+zoneheader="$zonedir/gielen.name.header"
+zonefile="acme-challenges.txt.rr"
+
+usage() {
+	echo "usage: dns-manage add <hostname> <challenge>"
+	echo "       dns-manage del <hostname>"
+	echo "Add or remove ACME-challenges to a DNS zone file."
+	exit 1
+}
+
+# parse cli
+action="$1"
+hostname="$2"
+challenge="$3"
+[ -z "$hostname" ] && usage
+key="_acme-challenge.${hostname}."
+
+# remove old record
+sed -i "/^${key}/d" $zonefile
+
+case "$action" in
+	del)	;;
+	add)	[ -z "$challenge" ] && usage
+		echo "${key} 60 IN TXT \"${challenge}\"" >> ${zonefile}
+		;;
+	*)	usage ;;
+esac
+
+./update-serial $zoneheader
+
+puppet-kick dnsserver
