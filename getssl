@@ -405,7 +405,7 @@ if [ ${_CREATE_CONFIG} -eq 1 ]; then
   else
     info "creating domain config file in $DOMAIN_DIR/getssl.cfg"
     EX_CERT=$(echo | openssl s_client -servername ${DOMAIN} -connect ${DOMAIN}:443 2>/dev/null | openssl x509 2>/dev/null)
-    EX_SANS="www.${DOMAIN}"
+    EX_SANS=""
     if [ ! -z "${EX_CERT}" ]; then
       if [ ! -f "$DOMAIN_DIR/${DOMAIN}.crt" ]; then
         echo "$EX_CERT" > $DOMAIN_DIR/${DOMAIN}.crt
