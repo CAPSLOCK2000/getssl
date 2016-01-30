@@ -13,7 +13,7 @@
 # GNU General Public License at <http://www.gnu.org/licenses/> for
 # more details.
 
-# Usage: getssl [-h|--help] [-d|--debug] [-c] [-w working_dir] domain
+# Usage: getssl [-h|--help] [-d|--debug] [-c] [-a|--all] [-w working_dir] domain
 
 # Revision history:
 # 2016-01-08 Created (v0.1)
@@ -28,10 +28,14 @@
 # 2016-01-26 correcting a couple of small bugs and allow curl to follow redirects (v0.10)
 # 2016-01-27 add a very basic openssl.cnf file if it doesn't exist and tidy code slightly (v0.11)
 # 2016-01-28 Typo corrections, quoted file variables and fix bug on DNS_DEL_COMMAND (v0.12)
+# 2016-01-28 changed DNS checks to use nslookup and allow hyphen in domain names (v0.13)
+# 2016-01-29 Fix ssh-reload-command, extra waiting for DNS-challenge, add some error_exit and cleanup help message (v0.14)
+# 2016-01-29 added -a|--all option to renew all configured certificates (v0.15)
+# 2016-01-29 added option for eliptic curve keys (v0.16)
 # ---------------------------------------------------------------------------
 
 PROGNAME=${0##*/}
-VERSION="0.12"
+VERSION="0.16"
 
 # defaults
 CA="https://acme-staging.api.letsencrypt.org"
@@ -39,12 +43,15 @@ AGREEMENT="https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf"
 ACCOUNT_KEY_LENGTH=4096
 WORKING_DIR=~/.getssl
 DOMAIN_KEY_LENGTH=4096
-SSLCONF=/etc/ssl/openssl.cnf
+SSLCONF="$(openssl version -d | cut -d\" -f2)/openssl.cnf"
 VALIDATE_VIA_DNS=""
 DNS_WAIT_TIME=2
 RELOAD_CMD=""
 RENEW_ALLOW="30"
+PRIVATE_KEY_ALG="rsa"
+_USE_DEBUG=0
 _CREATE_CONFIG=0
+_RENEW_ALL=0
 
 clean_up() { # Perform pre-exit housekeeping
   if [ ! -z "$DOMAIN_DIR" ]; then
@@ -77,7 +84,7 @@ signal_exit() { # Handle trapped signals
 }
 
 usage() {
-  echo -e "Usage: $PROGNAME [-h|--help] [-d|--debug] [-c] [-w working_dir] domain"
+  echo -e "Usage: $PROGNAME [-h|--help] [-d|--debug] [-c] [-a|--all] [-w working_dir] domain"
 }
 
 log() {
@@ -85,7 +92,7 @@ log() {
 }
 
 debug() {
-  if [[ "${_USE_DEBUG:-"0"}" -eq 1 ]]; then
+  if [ ${_USE_DEBUG} -eq 1 ]; then
     echo "$@"
   fi
 }
@@ -111,7 +118,7 @@ write_openssl_conf() {
 
 write_getssl_template() {
   cat > "$1" <<- _EOF_getssl_
-	# uncomment and modify any variables you need
+	# Uncomment and modify any variables you need
 	# The staging server is best for testing (hence set as default)
 	CA="https://acme-staging.api.letsencrypt.org"
 	# This server issues full certificates, however has rate limits
@@ -119,14 +126,15 @@ write_getssl_template() {
 
 	AGREEMENT="https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf"
 
-	#set an email address associated with your account - generally set at account level rather than domain.
+	# Set an email address associated with your account - generally set at account level rather than domain.
 	#ACCOUNT_EMAIL="me@example.com"
 	ACCOUNT_KEY_LENGTH=4096
 	ACCOUNT_KEY="$WORKING_DIR/account.key"
-
-	#The command needed to reload apache / gninx or whatever you use
+	PRIVATE_KEY_ALG="rsa"
+  
+	# The command needed to reload apache / nginx or whatever you use
 	#RELOAD_CMD=""
-	#The time period within which you want to allow renewal of a certificate - this prevents hitting some of the rate limits.
+	# The time period within which you want to allow renewal of a certificate - this prevents hitting some of the rate limits.
 	RENEW_ALLOW="30"
 
 	# openssl config file.  The default should work in most cases.
@@ -136,13 +144,14 @@ write_getssl_template() {
 	#VALIDATE_VIA_DNS="true"
 	#DNS_ADD_COMMAND=
 	#DNS_DEL_COMMAND=
-	#DNS_WAIT_TIME=
+	# If your DNS-server needs extra time to make sure your DNS changes are readable by the ACME-server (time in seconds)
+	#DNS_EXTRA_WAIT=60
 	_EOF_getssl_
 }
 
 write_domain_template() {
   cat > "$1" <<- _EOF_domain_
-	# uncomment and modify any variables you need
+	# Uncomment and modify any variables you need
 	# The staging server is best for testing
 	#CA="https://acme-staging.api.letsencrypt.org"
 	# This server issues full certificates, however has rate limits
@@ -150,36 +159,38 @@ write_domain_template() {
 
 	#AGREEMENT="https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf"
 
-	#set an email address associated with your account - generally set at account level rather than domain.
+	# Set an email address associated with your account - generally set at account level rather than domain.
 	#ACCOUNT_EMAIL="me@example.com"
 	#ACCOUNT_KEY_LENGTH=4096
 	#ACCOUNT_KEY="$WORKING_DIR/account.key"
-
-	# additional domains - this could be multiple domains / subdomains in a comma separated list
+	PRIVATE_KEY_ALG="rsa"
+  
+	# Additional domains - this could be multiple domains / subdomains in a comma separated list
 	SANS=${EX_SANS}
 
-	#Acme Challenge Location.   The first line for the domain, the following ones for each additional domain
-	#if these start with ssh: then the next variable is assumed to be the hostname and the rest the location.
-	#an ssh key will be needed to provide you with access to the remote server.
+	# Acme Challenge Location. The first line for the domain, the following ones for each additional domain.
+	# If these start with ssh: then the next variable is assumed to be the hostname and the rest the location.
+	# An ssh key will be needed to provide you with access to the remote server.
 	#ACL=('/var/www/${DOMAIN}/web/.well-known/acme-challenge'
 	#     'ssh:server5:/var/www/${DOMAIN}/web/.well-known/acme-challenge')
 
-	# location for all your certs these can either be on the server ( so full path name) or using ssh as for the ACL
+	# Location for all your certs, these can either be on the server (so full path name) or using ssh as for the ACL
 	#DOMAIN_CERT_LOCATION="ssh:server5:/etc/ssl/domain.crt"
 	#DOMAIN_KEY_LOCATION="ssh:server5:/etc/ssl/domain.key"
 	#CA_CERT_LOCATION="/etc/ssl/chain.crt"
-	#DOMAIN_PEM_LOCATION="" 
+	#DOMAIN_PEM_LOCATION=""
 
-	# the command needed to reload apache / gninx or whatever you use
+	# The command needed to reload apache / nginx or whatever you use
 	#RELOAD_CMD=""
-	#The time period within which you want to allow renewal of a certificate - this prevents hitting some of the rate limits.
-	RENEW_ALLOW="30"
+	# The time period within which you want to allow renewal of a certificate - this prevents hitting some of the rate limits.
+	#RENEW_ALLOW="30"
 
 	#Use the following 4 variables if you want to validate via DNS
 	#VALIDATE_VIA_DNS="true"
 	#DNS_ADD_COMMAND=
 	#DNS_DEL_COMMAND=
-	#DNS_WAIT_TIME=
+	# If your DNS-server needs extra time to make sure your DNS changes are readable by the ACME-server (time in seconds)
+	#DNS_EXTRA_WAIT=60
 	_EOF_domain_
 }
 
@@ -194,7 +205,7 @@ send_signed_request() {
   CURL_HEADER="$TEMP_DIR/curl.header"
   dp="$TEMP_DIR/curl.dump"
   CURL="curl --silent --dump-header $CURL_HEADER "
-  if [[ "${_USE_DEBUG:-"0"}" -eq 1 ]] ; then
+  if [ ${_USE_DEBUG} -eq 1 ]; then
     CURL="$CURL --trace-ascii $dp "
   fi
   payload64=$(echo -n $payload | base64 -w 0 | _b64)
@@ -270,24 +281,23 @@ _requires() {
   result=$(which $1 2>/dev/null)
   debug "checking for required $1 ... $result"
   if [ -z "$result" ]; then
-    echo "This script requires $1 installed"
-    graceful_exit
+    error_exit "This script requires $1 installed"
   fi
 }
 
 help_message() {
    cat <<- _EOF_
-   $PROGNAME ver. $VERSION
-   To obtain a letsencrypt SSL cert
+$PROGNAME ver. $VERSION
+Obtain SSL certificates from the letsencrypt.org ACME server
 
-   $(usage)
+$(usage)
 
-   Options:
-  -h, --help  Display this help message and exit.
-  -d, --debug  outputs debug information
-  -c,          create default config files
-  -w working_dir  working directory
-    Where 'working_dir' is the Working Directory.
+Options:
+  -h, --help      Display this help message and exit
+  -d, --debug     Outputs debug information
+  -c,             Create default config files
+  -a, --all       Renew all certificates
+  -w working_dir  Working directory
 
 _EOF_
   return
@@ -306,6 +316,8 @@ while [[ -n $1 ]]; do
      _USE_DEBUG=1 ;;
     -c | --create)
      _CREATE_CONFIG=1 ;;
+    -a | --all)
+     _RENEW_ALL=1 ;;
     -w)
       echo "working directory"; shift; WORKING_DIR="$1" ;;
     -* | --*)
@@ -325,6 +337,36 @@ _requires openssl
 _requires curl
 _requires xxd
 _requires base64
+_requires nslookup
+
+if [ ${_RENEW_ALL} -eq 1 ]; then
+  info "Renew all certificates"
+
+  if [ ${_CREATE_CONFIG} -eq 1 ]; then
+    error_exit "cannot combine -c|--create with -a|--all"
+  fi
+
+  if [ ! -d "$WORKING_DIR" ]; then
+    error_exit "working dir not found or not set - $WORKING_DIR"
+  fi
+
+  for dir in $(ls "$WORKING_DIR"); do
+    if [ -d "$WORKING_DIR/$dir" ]; then
+      info "Renewing $dir"
+
+      cmd="$0 -w '$WORKING_DIR'"
+      if [ ${_USE_DEBUG} -eq 1 ]; then
+        cmd="$cmd -d"
+      fi
+      cmd="$cmd $dir"
+
+      debug "CMD: $cmd"
+      eval "$cmd"
+    fi
+  done
+
+  graceful_exit
+fi
 
 if [ -z "$DOMAIN" ]; then
   help_message
@@ -369,7 +411,7 @@ if [ ${_CREATE_CONFIG} -eq 1 ]; then
         echo "$EX_CERT" > $DOMAIN_DIR/${DOMAIN}.crt
       fi
       EX_SANS=$(echo "$EX_CERT" | openssl x509 -noout -text 2>/dev/null| grep "Subject Alternative Name" -A2 \
-                | grep -Eo "DNS:[a-zA-Z 0-9.]*" | sed "s@DNS:$DOMAIN@@g" | grep -v '^$' | cut -c 5-)
+                | grep -Eo "DNS:[a-zA-Z 0-9.-]*" | sed "s@DNS:$DOMAIN@@g" | grep -v '^$' | cut -c 5-)
       EX_SANS=${EX_SANS//$'\n'/','}
     fi
     write_domain_template "$DOMAIN_DIR/getssl.cfg"
@@ -422,7 +464,13 @@ if [ -f "$ACCOUNT_KEY" ]; then
   debug "Account key exists at $ACCOUNT_KEY skipping generation"
 else
   info "creating account key $ACCOUNT_KEY"
-  openssl genrsa $ACCOUNT_KEY_LENGTH > "$ACCOUNT_KEY"
+  if [[ "${PRIVATE_KEY_ALG}" == "rsa" ]]; then
+    openssl genrsa $ACCOUNT_KEY_LENGTH > "$ACCOUNT_KEY"
+  elif [[ "${PRIVATE_KEY_ALG}" == "prime256v1" ]]; then
+    openssl ecparam -genkey -name prime256v1 > "$ACCOUNT_KEY"
+  else
+    error_exit "unknown private key algorithm type ${PRIVATE_KEY_ALG}"
+  fi
 fi
 
 if [ -f "$DOMAIN_DIR/${DOMAIN}.key" ]; then
@@ -449,8 +497,7 @@ if [ -f "$DOMAIN_DIR/${DOMAIN}.csr" ]; then
   debug "domain csr exists at - $DOMAIN_DIR/${DOMAIN}.csr - skipping generation"
   #check csr is valid for domain
   if [ "$(openssl req -noout -text -in $DOMAIN_DIR/${DOMAIN}.csr| grep -o DNS:${DOMAIN})" != "DNS:${DOMAIN}" ]; then
-    echo "existing csr at $DOMAIN_DIR/${DOMAIN}.csr does not appear to be valid for ${DOMAIN} - aborting"
-    graceful_exit
+    error_exit "existing csr at $DOMAIN_DIR/${DOMAIN}.csr does not appear to be valid for ${DOMAIN} - aborting"
   fi
 else
   debug "creating domain csr - $DOMAIN_DIR/${DOMAIN}.csr"
@@ -494,8 +541,7 @@ if [ "$code" == "" ] || [ "$code" == '201' ] ; then
 elif [ "$code" == '409' ] ; then
   debug "Already registered"
 else
-  echo "Error registering account"
-  graceful_exit
+  error_exit "Error registering account"
 fi
 
 # verify each domain
@@ -540,34 +586,37 @@ for d in $alldomains; do
     auth_key=$(printf '%s' "$keyauthorization" | openssl sha -sha256 -binary | openssl base64 -e | tr -d '\n\r' | sed -e 's:=*$::g' -e 'y:+/:-_:')
     debug auth_key "$auth_key"
 
-    $DNS_ADD_COMMAND "$DOMAIN" "$auth_key"
+    debug "adding dns via command: $DNS_ADD_COMMAND $d $auth_key"
+    $DNS_ADD_COMMAND "$d" "$auth_key"
 
     primary_ns=$(dig +noall +authority -t SOA ${DOMAIN} | awk '{print $5}' | sed 's/.$//' | head -1)
     debug primary_ns $primary_ns
 
     ntries=0
     check_dns="fail"
-    while [[ "$check_dns" == "fail" ]]; do
-
-      check_result=$(dig _acme-challenge.${DOMAIN} TXT +short @${primary_ns}| sed 's/"//g')
+    while [ "$check_dns" == "fail" ]; do
+      check_result=$(nslookup -type=txt _acme-challenge.${d} ${primary_ns} | grep ^_acme|awk -F'"' '{ print $2}')
       debug result "$check_result"
 
       if [[ "$check_result" == "$auth_key" ]]; then
         check_dns="success"
-        debug "checking DNS ... _acme-challenge.$DOMAIN gave $check_result"
+        debug "checking DNS ... _acme-challenge.$d gave $check_result"
+        if [ "$DNS_EXTRA_WAIT" != "" ]; then
+          info "sleeping $DNS_EXTRA_WAIT seconds before asking the ACME-server to check the dns"
+          sleep $DNS_EXTRA_WAIT
+        fi
       else
-        if [[ $ntries -lt 5 ]]; then
+        if [[ $ntries -lt 100 ]]; then
           ntries=$(( $ntries + 1 ))
-          debug "try $ntries - sleep $DNS_DELAY_TIME secs before testing verify again"
-          sleep $DNS_DELAY_TIME
+          info "testing DNS. Attempt $ntries/100 completed. waiting 10 secs before testing verify again"
+          sleep 10
         else
           debug "dns check failed - removing existing value"
-          $DNS_DEL_COMMAND $DOMAIN
+          $DNS_DEL_COMMAND "$d"
           error_exit "checking _acme-challenge.$DOMAIN gave $check_result not $auth_key"
         fi
       fi
     done
-
   else      # set up the correct http token for verification
     http01=$(echo $response | egrep -o  '{[^{]*"type":"http-01"[^}]*')
     debug http01 "$http01"
@@ -698,11 +747,11 @@ if [ ! -z "$DOMAIN_PEM_LOCATION" ]; then
   copy_file_to_location "$DOMAIN_DIR/${DOMAIN}.pem"  "$DOMAIN_PEM_LOCATION"
 fi
 
-# Run reload command to restart apache / gninx or whatever system
+# Run reload command to restart apache / nginx or whatever system
 
 if [ ! -z "$RELOAD_CMD" ]; then
   info "reloading SSL services"
-  if [[ "${ACL[$dn]:0:4}" == "ssh:" ]] ; then
+  if [[ "${RELOAD_CMD:0:4}" == "ssh:" ]] ; then
     sshhost=$(echo "$RELOAD_CMD"| awk -F: '{print $2}')
     command=${RELOAD_CMD:(( ${#sshhost} + 5))}
     debug "running following comand to reload cert"
