@@ -48,6 +48,7 @@ VALIDATE_VIA_DNS=""
 DNS_WAIT_TIME=2
 RELOAD_CMD=""
 RENEW_ALLOW="30"
+PORT=443
 PRIVATE_KEY_ALG="rsa"
 _USE_DEBUG=0
 _CREATE_CONFIG=0
@@ -137,6 +138,10 @@ write_getssl_template() {
 	# The time period within which you want to allow renewal of a certificate - this prevents hitting some of the rate limits.
 	RENEW_ALLOW="30"
 
+	# Port used by this service.
+	# Used for checking the existing certicate.
+	#PORT="443""
+
 	# openssl config file.  The default should work in most cases.
 	SSLCONF="$SSLCONF"
 
@@ -184,6 +189,10 @@ write_domain_template() {
 	#RELOAD_CMD=""
 	# The time period within which you want to allow renewal of a certificate - this prevents hitting some of the rate limits.
 	#RENEW_ALLOW="30"
+
+	# Port used by this service.
+	# Used for checking the existing certicate.
+	#PORT="443""
 
 	#Use the following 4 variables if you want to validate via DNS
 	#VALIDATE_VIA_DNS="true"
@@ -404,7 +413,7 @@ if [ ${_CREATE_CONFIG} -eq 1 ]; then
     info "domain config already exists $DOMAIN_DIR/getssl.cfg"
   else
     info "creating domain config file in $DOMAIN_DIR/getssl.cfg"
-    EX_CERT=$(echo | openssl s_client -servername ${DOMAIN} -connect ${DOMAIN}:443 2>/dev/null | openssl x509 2>/dev/null)
+    EX_CERT=$(echo | openssl s_client -servername ${DOMAIN} -connect ${DOMAIN}:{$PORT} 2>/dev/null | openssl x509 2>/dev/null)
     EX_SANS=""
     if [ ! -z "${EX_CERT}" ]; then
       if [ ! -f "$DOMAIN_DIR/${DOMAIN}.crt" ]; then
